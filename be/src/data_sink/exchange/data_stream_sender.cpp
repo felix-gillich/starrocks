@@ -245,9 +245,10 @@ Status DataStreamSender::Channel::send_one_chunk(const Chunk* chunk, bool eos, b
 
     // If chunk is not null, append it to request
     if (chunk != nullptr) {
-        auto pchunk = _chunk_request.add_chunks();
-        RETURN_IF_ERROR(_parent->serialize_chunk(chunk, pchunk, &_is_first_chunk));
-        _current_request_bytes += pchunk->data().size();
+        ChunkPB pchunk;
+        RETURN_IF_ERROR(_parent->serialize_chunk(chunk, &pchunk, &_is_first_chunk));
+        _current_request_bytes += pchunk.data().size();
+        _chunk_request.add_chunks()->Swap(&pchunk);
     }
 
     // Try to accumulate enough bytes before sending a RPC. When eos is true we should send
@@ -514,10 +515,11 @@ Status DataStreamSender::send_chunk(RuntimeState* state, Chunk* chunk) {
     if (_part_type == TPartitionType::UNPARTITIONED || _channels.size() == 1) {
         // We use sender request to avoid serialize chunk many times.
         // 1. create a new chunk PB to serialize
-        ChunkPB* pchunk = _chunk_request.add_chunks();
+        ChunkPB pchunk;
         // 2. serialize input chunk to pchunk
-        RETURN_IF_ERROR(serialize_chunk(chunk, pchunk, &_is_first_chunk, _channels.size()));
-        _current_request_bytes += pchunk->data().size();
+        RETURN_IF_ERROR(serialize_chunk(chunk, &pchunk, &_is_first_chunk, _channels.size()));
+        _current_request_bytes += pchunk.data().size();
+        _chunk_request.add_chunks()->Swap(&pchunk);
         // 3. if request bytes exceed the threshold, send current request
         if (_current_request_bytes > _request_bytes_threshold) {
             butil::IOBuf attachment;
