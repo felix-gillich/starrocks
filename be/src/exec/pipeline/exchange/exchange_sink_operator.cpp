@@ -384,12 +384,20 @@ Status ExchangeSinkOperator::Channel::send_one_chunk(RuntimeState* state, const 
             COUNTER_SET(_parent->_pass_through_buffer_peak_mem_usage, _pass_through_context.total_bytes());
         } else {
             ChunkPB pchunk;
-            TRY_CATCH_BAD_ALLOC(RETURN_IF_ERROR(_parent->serialize_chunk(chunk, &pchunk, &_is_first_chunk)));
-            if (_parent->_is_pipeline_level_shuffle) {
-                _chunk_request->add_driver_sequences(driver_sequence);
-            }
-            _current_request_bytes += pchunk.data().size();
-            _chunk_request->add_chunks()->Swap(&pchunk);
+            size_t serialized_bytes = 0;
+            TRY_CATCH_BAD_ALLOC({
+                RETURN_IF_ERROR(_parent->serialize_chunk(chunk, &pchunk, &_is_first_chunk));
+                serialized_bytes = pchunk.data().size();
+                // Append only after serialization succeeded. Reserve the driver sequence and add the chunk
+                if (_parent->_is_pipeline_level_shuffle) {
+                    _chunk_request->mutable_driver_sequences()->Reserve(_chunk_request->driver_sequences_size() + 1);
+                }
+                _chunk_request->add_chunks()->Swap(&pchunk);
+                if (_parent->_is_pipeline_level_shuffle) {
+                    _chunk_request->add_driver_sequences(driver_sequence);
+                }
+            });
+            _current_request_bytes += serialized_bytes;
         }
     }
 
@@ -692,10 +700,15 @@ Status ExchangeSinkOperator::push_chunk(RuntimeState* state, const ChunkPtr& chu
             // 1. create a new chunk PB to serialize
             ChunkPB pchunk;
             // 2. serialize input chunk to pchunk
-            TRY_CATCH_BAD_ALLOC(
-                    RETURN_IF_ERROR(serialize_chunk(send_chunk, &pchunk, &_is_first_chunk, _channels.size())));
-            _current_request_bytes += pchunk.data().size();
-            _chunk_request->add_chunks()->Swap(&pchunk);
+            size_t serialized_bytes = 0;
+            TRY_CATCH_BAD_ALLOC({
+                RETURN_IF_ERROR(serialize_chunk(send_chunk, &pchunk, &_is_first_chunk, _channels.size()));
+                serialized_bytes = pchunk.data().size();
+                // Append only after serialization succeeded, inside the guard so a bad_alloc from growing the
+                // request becomes a memory error instead of escaping.
+                _chunk_request->add_chunks()->Swap(&pchunk);
+            });
+            _current_request_bytes += serialized_bytes;
             // 3. if request bytes exceede the threshold, send current request
             if (_current_request_bytes > config::max_transmit_batched_bytes) {
                 butil::IOBuf attachment;
